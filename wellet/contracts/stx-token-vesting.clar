@@ -1,14 +1,15 @@
-;; STX Token Vesting Contract
-;; This contract manages the vesting of STX tokens for a given beneficiary
+;; Enhanced STX Token Vesting Contract
+;; Includes additional features and improvements over the initial implementation
 
 (define-constant CONTRACT_OWNER tx-sender)
 
-(define-data-var vesting-start-block (optional uint) none)
-(define-data-var vesting-duration-blocks (optional uint) none)
-(define-data-var vesting-cliff-blocks (optional uint) none)
-(define-data-var beneficiary (optional principal) none)
-(define-data-var token-contract-id (optional (string-ascii 128)) none)
-(define-data-var total-vested-tokens (optional uint) none)
+(define-data-var vesting-schedules (list 128 (tuple (start-block uint)
+                                                   (duration-blocks uint)
+                                                   (cliff-blocks uint)
+                                                   (beneficiary principal)
+                                                   (token-contract (string-ascii 128))
+                                                   (total-vested-tokens uint))))
+  (list))
 
 (define-public (initialize-vesting 
                   (start-block uint)
@@ -18,39 +19,49 @@
                   (token-contract (string-ascii 128)))
   (begin
     (asserts! (is-eq CONTRACT_OWNER tx-sender) err-not-contract-owner)
-    (var-set vesting-start-block start-block)
-    (var-set vesting-duration-blocks duration-blocks)
-    (var-set vesting-cliff-blocks cliff-blocks) 
-    (var-set beneficiary beneficiary-principal)
-    (var-set token-contract-id token-contract)
-    (var-set total-vested-tokens 0)
+    (map-insert vesting-schedules (len vesting-schedules) 
+                { start-block: start-block, 
+                  duration-blocks: duration-blocks,
+                  cliff-blocks: cliff-blocks,
+                  beneficiary: beneficiary-principal,
+                  token-contract: token-contract,
+                  total-vested-tokens: 0 })
     (ok True)
   )
 )
 
 (define-public (claim-vested-tokens)
-  (let ((start-block (unwrap-panic (var-get vesting-start-block)))
-        (duration-blocks (unwrap-panic (var-get vesting-duration-blocks)))
-        (cliff-blocks (unwrap-panic (var-get vesting-cliff-blocks)))
-        (beneficiary (unwrap-panic (var-get beneficiary)))
-        (token-contract (unwrap-panic (var-get token-contract-id))))
-    (begin
-      (asserts! (is-eq tx-sender beneficiary) err-not-beneficiary)
-      (asserts! (> (+ start-block cliff-blocks) block-height) err-tokens-not-vested)
-      
-      (let ((vested-tokens (calculate-vested-tokens start-block duration-blocks cliff-blocks block-height)))
+  (let ((vesting-index (find-vesting-index tx-sender)))
+    (if (is-ok vesting-index)
+      (let ((vesting-schedule (element-at vesting-schedules (unwrap-ok vesting-index))))
         (begin
-          (map-set (var-get token-contract-id) (var-get beneficiary) (+ (get token (var-get token-contract-id) (var-get beneficiary)) vested-tokens))
-          (var-set total-vested-tokens (+ (var-get total-vested-tokens) vested-tokens))
-          (ok vested-tokens)
-        )
-      )
+          (asserts! (> (+ (get start-block vesting-schedule) (get cliff-blocks vesting-schedule)) block-height) err-tokens-not-vested)
+          (let ((vested-tokens (calculate-vested-tokens (get start-block vesting-schedule) 
+                                                       (get duration-blocks vesting-schedule)
+                                                       (get cliff-blocks vesting-schedule) 
+                                                       block-height)))
+            (begin
+              (map-set (get token-contract vesting-schedule) (get beneficiary vesting-schedule) (+ (get token (get token-contract vesting-schedule) (get beneficiary vesting-schedule)) vested-tokens))
+              (map-set vesting-schedules (unwrap-ok vesting-index) (merge-entry vesting-schedule { total-vested-tokens: (+ (get total-vested-tokens vesting-schedule) vested-tokens) }))
+              (ok vested-tokens)
+            )
+          )
+        ))
+      (err err-no-vesting-schedule)
     )
   )
 )
 
 (define-read-only (calculate-vested-tokens (start-block uint) (duration-blocks uint) (cliff-blocks uint) (current-block uint))
   (let ((total-vested (/ (* (max 0 (- current-block (+ start-block cliff-blocks))) 10000) (* duration-blocks 10000))))
-    (if (< total-vested 1) 0 (/ (* (var-get total-vested-tokens) total-vested) 10000))
+    (if (< total-vested 1) 0 (/ (* 10000 total-vested) 10000))
+  )
+)
+
+(define-read-only (find-vesting-index (principal))
+  (map-find vesting-schedules
+    (lambda (i s) 
+      (is-eq (get beneficiary s) principal)
+    )
   )
 )
